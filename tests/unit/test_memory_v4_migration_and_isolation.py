@@ -733,6 +733,189 @@ class _FakeStore:
         return list(self._data.get((user_id, workspace_id), []))
 
 
+def test_isolated_memory_md_seed_phase_2b3():
+    """Phase 2b.3：seed 内容包含 profile name + id，并明确说明是独立记忆。"""
+    from openakita.agents.factory import AgentFactory
+    from openakita.agents.profile import AgentProfile, AgentType
+
+    profile = AgentProfile(
+        id="my-coder",
+        name="My Coder",
+        description="d",
+        type=AgentType.CUSTOM,
+        created_by="u",
+        memory_mode="isolated",
+    )
+    seed = AgentFactory._isolated_memory_md_seed(profile)
+    assert "My Coder" in seed
+    assert "my-coder" in seed
+    assert "独立记忆" in seed or "isolated" in seed.lower()
+    # 不应该硬编码全局 OpenAkita 身份标记
+    assert "OpenAkita 的全局记忆" not in seed
+
+
+def test_apply_memory_isolation_seeds_md_when_missing(tmp_path: Path, monkeypatch):
+    """Phase 2b.3：isolated agent 首次启动时，profile_dir/identity/MEMORY.md
+    应该被自动 seed，而**不**回退到全局 settings.memory_path。"""
+    from unittest.mock import MagicMock
+
+    from openakita.agents.factory import AgentFactory
+    from openakita.agents.profile import AgentProfile, AgentType
+
+    # 准备 profile 目录
+    profile_dir = tmp_path / "agents" / "profiles" / "test-iso"
+    profile_dir.mkdir(parents=True)
+
+    fake_store = MagicMock()
+    fake_store.ensure_profile_dir.return_value = profile_dir
+    monkeypatch.setattr(
+        "openakita.agents.profile.get_profile_store", lambda: fake_store
+    )
+
+    profile = AgentProfile(
+        id="test-iso",
+        name="Test Iso",
+        description="d",
+        type=AgentType.CUSTOM,
+        created_by="u",
+        memory_mode="isolated",
+        memory_inherit_global=False,
+    )
+
+    fake_agent = MagicMock()
+    fake_agent.brain = MagicMock()
+    fake_agent.memory_manager = MagicMock()
+    fake_agent.memory_manager.store = MagicMock()
+    monkeypatch.setattr(
+        "openakita.memory.manager.MemoryManager",
+        lambda **kwargs: MagicMock(
+            _current_owner=lambda: ("default", "default"),
+            retrieval_engine=MagicMock(_external_sources=[]),
+        ),
+    )
+
+    # 关键断言：执行前 MEMORY.md 不存在
+    md_path = profile_dir / "identity" / "MEMORY.md"
+    assert not md_path.exists()
+
+    AgentFactory._apply_memory_isolation(fake_agent, profile)
+
+    # 执行后应该自动 seed
+    assert md_path.exists()
+    seed = md_path.read_text(encoding="utf-8")
+    assert "Test Iso" in seed
+    assert "test-iso" in seed
+
+
+def test_apply_memory_isolation_does_not_overwrite_existing_md(tmp_path: Path, monkeypatch):
+    """Phase 2b.3：已经存在的 MEMORY.md 不能被 seed 覆盖（防止抹掉用户数据）。"""
+    from unittest.mock import MagicMock
+
+    from openakita.agents.factory import AgentFactory
+    from openakita.agents.profile import AgentProfile, AgentType
+
+    profile_dir = tmp_path / "agents" / "profiles" / "test-iso2"
+    (profile_dir / "identity").mkdir(parents=True)
+    md_path = profile_dir / "identity" / "MEMORY.md"
+    existing_content = "# 用户辛苦编辑过的内容\n\n- 偏好A\n- 偏好B\n"
+    md_path.write_text(existing_content, encoding="utf-8")
+
+    fake_store = MagicMock()
+    fake_store.ensure_profile_dir.return_value = profile_dir
+    monkeypatch.setattr(
+        "openakita.agents.profile.get_profile_store", lambda: fake_store
+    )
+
+    profile = AgentProfile(
+        id="test-iso2",
+        name="Test Iso 2",
+        description="d",
+        type=AgentType.CUSTOM,
+        created_by="u",
+        memory_mode="isolated",
+        memory_inherit_global=False,
+    )
+
+    fake_agent = MagicMock()
+    fake_agent.brain = MagicMock()
+    fake_agent.memory_manager = MagicMock()
+    fake_agent.memory_manager.store = MagicMock()
+    monkeypatch.setattr(
+        "openakita.memory.manager.MemoryManager",
+        lambda **kwargs: MagicMock(
+            _current_owner=lambda: ("default", "default"),
+            retrieval_engine=MagicMock(_external_sources=[]),
+        ),
+    )
+
+    AgentFactory._apply_memory_isolation(fake_agent, profile)
+
+    assert md_path.read_text(encoding="utf-8") == existing_content
+
+
+def test_agent_profile_memory_isolation_alias_phase_2b2():
+    """Phase 2b.2：AgentProfile 同时支持新名 memory_isolation 和旧名 memory_mode。"""
+    from openakita.agents.profile import AgentProfile, AgentType
+
+    # 1) 默认值
+    p = AgentProfile(
+        id="t1", name="t1", description="d", type=AgentType.CUSTOM, created_by="u"
+    )
+    assert p.memory_mode == "shared"
+    assert p.memory_isolation == "shared"
+
+    # 2) 写新名同步到旧字段
+    p.memory_isolation = "isolated"
+    assert p.memory_mode == "isolated"
+    assert p.memory_isolation == "isolated"
+
+    # 3) to_dict 同时输出两个键，方便前端逐步迁移
+    d = p.to_dict()
+    assert d["memory_mode"] == "isolated"
+    assert d["memory_isolation"] == "isolated"
+
+    # 4) from_dict 只给新名也能正确还原
+    p2 = AgentProfile.from_dict(
+        {
+            "id": "t2",
+            "name": "t2",
+            "description": "d",
+            "type": "custom",
+            "created_by": "u",
+            "memory_isolation": "isolated",
+        }
+    )
+    assert p2.memory_mode == "isolated"
+
+    # 5) 同时给两个键，新名优先（与 to_dict 顺序一致）
+    p3 = AgentProfile.from_dict(
+        {
+            "id": "t3",
+            "name": "t3",
+            "description": "d",
+            "type": "custom",
+            "created_by": "u",
+            "memory_mode": "shared",
+            "memory_isolation": "isolated",
+        }
+    )
+    assert p3.memory_mode == "isolated"
+
+    # 6) 历史 JSON 文件（只有旧名）继续工作
+    p4 = AgentProfile.from_dict(
+        {
+            "id": "t4",
+            "name": "t4",
+            "description": "d",
+            "type": "custom",
+            "created_by": "u",
+            "memory_mode": "isolated",
+        }
+    )
+    assert p4.memory_mode == "isolated"
+    assert p4.memory_isolation == "isolated"
+
+
 def test_search_episodes_tenant_filter_phase_2b5(tmp_path: Path):
     """Phase 2b.5：search_episodes 带 user_id/workspace_id 时通过 JOIN session_tenants
     只返回该租户的 episode；不传则保持旧的全库扫描行为，向后兼容。"""

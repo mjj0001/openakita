@@ -416,6 +416,26 @@ class AgentFactory:
         logger.info(f"Identity override applied: profile={profile.id}, dir={profile_identity_dir}")
 
     @staticmethod
+    def _isolated_memory_md_seed(profile: AgentProfile) -> str:
+        """Phase 2b.3：生成 isolated agent 的 MEMORY.md 初始内容。
+
+        刻意不引用全局记忆，让 daily_consolidator 在该 Agent 运行一段时间后
+        用它**自己**的对话和经验填充。
+        """
+        from datetime import datetime
+
+        name = (profile.name or profile.id).strip()
+        return (
+            f"# {name} — 独立记忆\n\n"
+            f"<!-- Phase 2b.3 seeded {datetime.now().isoformat(timespec='seconds')} -->\n\n"
+            f"_这是 Agent `{profile.id}` 的独立记忆文件。_\n\n"
+            f"这个 Agent 配置了 `memory_isolation=isolated`，所以它有自己的偏好、"
+            f"经验和事实记忆，不会和其它 Agent / 全局记忆混在一起。\n\n"
+            f"当 Agent 在对话里习得新的偏好、规则或事实，后台 lifecycle 任务会"
+            f"把它们写到这里。_无需手动编辑。_\n"
+        )
+
+    @staticmethod
     def _apply_memory_isolation(agent: Agent, profile: AgentProfile) -> None:
         """替换 agent.memory_manager 为独立的 MemoryManager 实例。"""
         from ..config import settings
@@ -427,9 +447,34 @@ class AgentFactory:
         memory_dir = profile_dir / "memory"
         memory_dir.mkdir(parents=True, exist_ok=True)
 
+        # Phase 2b.3：isolated agent 首次启动 seed 一份属于自己的 MEMORY.md。
+        #
+        # 旧实现（v4 之前）：找不到 profile 自己的 MEMORY.md 时回退到全局
+        # ``settings.memory_path``。这有两个问题：
+        # 1) 启动时读到的是**别人**（全局）的偏好和经验，破坏 isolated 语义；
+        # 2) daily_consolidator.refresh_memory_md() 会用 isolated MemoryManager
+        #    的数据**覆写**全局 MEMORY.md —— 这是真正的数据污染 bug。
+        #
+        # 新实现：永远使用 profile 私有的路径；不存在就写入一份带注释头的
+        # 空模板，让用户知道这是该 Agent 的独立记忆区域。
         memory_md_path = profile_dir / "identity" / "MEMORY.md"
         if not memory_md_path.exists():
-            memory_md_path = settings.memory_path
+            try:
+                memory_md_path.parent.mkdir(parents=True, exist_ok=True)
+                seed = AgentFactory._isolated_memory_md_seed(profile)
+                memory_md_path.write_text(seed, encoding="utf-8")
+                logger.info(
+                    "[Memory] Seeded isolated MEMORY.md for %s at %s",
+                    profile.id, memory_md_path,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[Memory] Failed to seed MEMORY.md for %s (%s); falling "
+                    "back to global path. This may temporarily cross-pollinate "
+                    "global memory.",
+                    profile.id, e,
+                )
+                memory_md_path = settings.memory_path
 
         isolated_mm = MemoryManager(
             data_dir=memory_dir,
