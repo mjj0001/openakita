@@ -252,6 +252,7 @@ class OrgRuntime:
         # 产生的真实附件重复落盘。
         # key = "{org_id}:{node_id}"（与 _node_last_activity 对齐），值 = int。
         self._node_files_registered_in_task: dict[str, int] = {}
+        self._node_file_attachments_in_task: dict[str, list[dict]] = {}
 
         # 工作台节点：本任务内由 plugin tool hook 自动登记的附件清单。
         # _record_plugin_asset_output 成功 register 时 append，
@@ -1401,6 +1402,7 @@ class OrgRuntime:
             # 都会让该 counter +1。auto-persist 兜底仅在 counter==0 时触发，
             # 杜绝"LLM 已自己写过文件 + 系统又兜底落盘"的双写。
             self._node_files_registered_in_task[cache_key] = 0
+            self._node_file_attachments_in_task[cache_key] = []
             # plugin hook 登记附件缓冲清零：本任务内由 _record_plugin_asset_output
             # 产生的附件会累计到这里，供 _handle_org_submit_deliverable 在 LLM
             # 未传 file_attachments 时自动取用。
@@ -1447,7 +1449,7 @@ class OrgRuntime:
             #      在要"附件/文件类"成果，否则强行落盘是噪音；
             #   3. 本任务内 _register_file_output 计数 == 0 —— LLM 没自己
             #      产出过任何文件（写过的不重复）；
-            #   4. result_text 是有意义的长文（≥200 字符）—— 短回复落盘
+            #   4. result_text 是有意义的正文（由 tool_handler 阈值把关）—— 短回复落盘
             #      只会污染 workspace。
             # 任何异常仅 warning，不影响主流程。
             persisted_attachment: dict | None = None
@@ -1468,7 +1470,8 @@ class OrgRuntime:
                 and expects_artifact
                 and files_registered == 0
                 and isinstance(result_text, str)
-                and len(result_text.strip()) >= 200
+                and len(result_text.strip())
+                >= self._tool_handler._FINAL_ANSWER_AUTO_PERSIST_MIN_CHARS
             ):
                 try:
                     workspace_for_persist = self._resolve_org_workspace(org)
@@ -1777,6 +1780,15 @@ class OrgRuntime:
 
             is_root = (node.level == 0 or not org.get_parent(node.id))
             if is_root:
+                visible_attachments = self._node_file_attachments_in_task.get(cache_key, [])
+                if persisted_attachment is not None and not any(
+                    str(a.get("file_path") or "").lower() == str(
+                        persisted_attachment.get("file_path") or ""
+                    ).lower()
+                    for a in visible_attachments
+                    if isinstance(a, dict)
+                ):
+                    visible_attachments = [*visible_attachments, persisted_attachment]
                 # 只有来源属于"用户可见终态"的激活才允许写入 _latest_root_result。
                 # 见 _origin_from_msg_type 与 _FINAL_RESULT_ORIGINS：
                 # - user_command：send_command 下发的首次激活
@@ -1797,6 +1809,7 @@ class OrgRuntime:
                     origin=origin,
                     is_normal=is_normal,
                     exit_reason=exit_reason,
+                    file_attachments=visible_attachments or None,
                 )
 
             # 非正常结束时不触发 post-task hook（避免把"部分/失败结果"再次下发下游）；
@@ -1810,6 +1823,8 @@ class OrgRuntime:
                 "exit_reason": exit_reason,
                 **tool_stats,
             }
+            if persisted_attachment is not None:
+                return_payload["file_attachments"] = [persisted_attachment]
             if diagnosis:
                 return_payload["diagnosis"] = diagnosis
             if is_soft_verify:
@@ -4279,6 +4294,7 @@ class OrgRuntime:
         origin: str,
         is_normal: bool,
         exit_reason: str,
+        file_attachments: list[dict] | None = None,
     ) -> dict | None:
         """Cache the best root-node answer that is safe to show to the user.
 
@@ -4318,6 +4334,8 @@ class OrgRuntime:
             }
 
         if payload is not None:
+            if file_attachments:
+                payload["file_attachments"] = list(file_attachments)
             self._latest_root_result[org_id] = payload
         return payload
 
@@ -5310,6 +5328,18 @@ class OrgRuntime:
             self._node_files_registered_in_task[counter_key] = (
                 self._node_files_registered_in_task.get(counter_key, 0) + 1
             )
+            attachments = self._node_file_attachments_in_task.setdefault(counter_key, [])
+            registered_attachment = {
+                "filename": resolved_name,
+                "file_path": str(p),
+                "file_size": size_bytes,
+            }
+            if not any(
+                isinstance(a, dict)
+                and str(a.get("file_path") or "").lower() == str(p).lower()
+                for a in attachments
+            ):
+                attachments.append(registered_attachment)
         except Exception:
             pass
 

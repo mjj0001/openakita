@@ -460,8 +460,9 @@ class OrgToolHandler:
     # 节点级最终答复兜底落盘的最小字符数。比 submit_deliverable 通道更宽松：
     # 此通道由 OrgRuntime 在 expects_artifact=True、且本任务零文件登记时主动
     # 触发，已完成"是否需要附件"的语义把关，无需再用结构化文档启发式过滤。
-    # 200 字符是经验阈值——比"我已完成"长，又能覆盖 200~300 字的简短报告。
-    _FINAL_ANSWER_AUTO_PERSIST_MIN_CHARS = 200
+    # 80 字符是经验阈值——比"我已完成"这类短确认长，又能覆盖用户明确要求
+    # “发我 md/doc 文件”时模型给出的简短结构化正文。
+    _FINAL_ANSWER_AUTO_PERSIST_MIN_CHARS = 80
 
     def auto_persist_node_final_answer(
         self,
