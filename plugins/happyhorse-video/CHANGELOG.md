@@ -4,6 +4,78 @@ All notable changes to this plugin are recorded here. The plugin follows
 [SemVer](https://semver.org/) and the project's standard
 "date-versioned changelog" convention.
 
+## [1.1.0] — 2026-05-17
+
+### Added
+
+- **`hh_storyboard_decompose` LLM tool** — wraps the existing
+  `POST /storyboard/decompose` REST handler. Takes `story` /
+  `total_duration` / `segment_duration` / `aspect_ratio` / `style`
+  and synchronously returns `{ok, task_id, segments: [...], ...}` so
+  an org agent can pipe its output straight into `hh_long_video_create`.
+  Each segment carries `prompt` / `duration` / `key_frame_description` /
+  `end_frame_description` / `transition_to_next` (`cut` / `crossfade` /
+  `ai_extend`) / `camera_notes`. Shares the Brain serialisation lock
+  with the REST route.
+- **`hh_video_concat` LLM tool** — wraps `POST /long-video/concat`.
+  Takes `task_ids` (≥2 already-downloaded video tasks), `transition`
+  (`none` / `cut` / `crossfade` / `fade` / `xfade` / `dissolve` /
+  `ai_extend` — all aliases normalise to `none` or `crossfade`),
+  `fade_duration`, and optional `output_name`. Produces a real
+  `long_video_concat` task row, publishes the merged MP4 as an
+  Asset Bus entry, and returns `{ok, task_id, output_path,
+  preview_url, asset_ids, transition, segments_used}`.
+- Both new tools are declared in `plugin.json#provides.tools` and
+  classified in `tool_classes` (`network_out` / `exec_low_risk`).
+
+### Changed
+
+- Updated the upstream default org template **`aigc-video-studio`**
+  ([`src/openakita/orgs/templates.py`](../../src/openakita/orgs/templates.py))
+  to a 7-node HappyHorse-only studio (producer + screenwriter +
+  art-director + 4 workbench leaves: image / video / digital-human /
+  long-video post). All four workbench nodes share
+  `plugin_origin.plugin_id = "happyhorse-video"` but expose
+  category-specific `external_tools` subsets.
+  - **Hierarchy single-parent invariant**: `art-director` is the only
+    hierarchy parent of all four workbench leaves. The producer
+    delegates to screenwriter/art-director and the art-director
+    handles workbench dispatch (including the long-video concat
+    step) — this is enforced by
+    `test_art_director_owns_all_workbench_nodes` and required so that
+    `org_submit_deliverable`'s `get_parent` fallback always routes
+    workbench results back to the art-director (the actual delegator)
+    instead of bypassing them to producer.
+- Plugin entry-point docstring bumped from "20 LLM tools" to **22**
+  to account for the two new wrappers.
+- `hh_storyboard_decompose` / `hh_video_concat` success payloads now
+  carry the full workbench-protocol field set (`ok / task_id / status
+  / mode / model_id / video_url / video_path / last_frame_url /
+  last_frame_path / image_urls / local_paths / asset_ids`) in
+  addition to their tool-specific fields (`segments`, `output_path`,
+  `preview_url`, `transition`, ...) so `OrgRuntime
+  ._record_plugin_asset_output` can pick up the merged MP4 by either
+  `video_url` or `asset_ids` without bespoke handling.
+
+### Removed
+
+- The legacy companion org template **`happyhorse-video-studio`**
+  ("百炼 AIGC 视频创作工作室", which paired `tongyi-image` with
+  `happyhorse-video`) has been folded into the new default
+  `aigc-video-studio`. Users with an existing
+  `data/org_templates/happyhorse-video-studio.json` should delete
+  that JSON manually — `ensure_builtin_templates` only seeds missing
+  files and will not auto-remove orphaned templates.
+
+### Migration
+
+- Old environments may also have a stale
+  `data/org_templates/aigc-video-studio.json` left over from the
+  previous Seedance-based default. Delete both JSONs and restart the
+  server to pick up the new defaults; in-flight orgs forked from
+  either template keep working but their workbench nodes will show
+  `deprecated_tools` warnings until you re-bind them.
+
 ## [1.0.0] — 2026-05-15
 
 Initial release. Bailian-powered unified video studio merging the spirit
@@ -44,7 +116,8 @@ Bailian).
   icons inlined into `_assets/icons.js`.
 - **Org template** `happyhorse-video-studio` registered in
   [`src/openakita/orgs/templates.py`](../../src/openakita/orgs/templates.py)
-  for end-to-end "Bailian AIGC video studio" orchestration.
+  for end-to-end "Bailian AIGC video studio" orchestration. *(Removed
+  in 1.1.0 — see the 1.1.0 entry above for the replacement.)*
 - Companion test plan doc
   [`docs/happyhorse-video-test-plan.md`](../../docs/happyhorse-video-test-plan.md).
 
