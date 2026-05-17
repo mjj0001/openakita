@@ -1150,6 +1150,7 @@ function MainApp() {
           setServiceStatus(prev => ({
             ...(prev || { pid: null, pidFile: "" }),
             running: true,
+            pid: typeof data.pid === "number" ? data.pid : (prev?.pid ?? null),
             heartbeatPhase: readinessPhase || prev?.heartbeatPhase,
             heartbeatHttpReady: readinessHttpReady ?? prev?.heartbeatHttpReady,
             heartbeatImReady: readinessImReady ?? prev?.heartbeatImReady,
@@ -2487,6 +2488,7 @@ function MainApp() {
 
       // Verify the service is actually alive before trying HTTP API
       let serviceAlive = false;
+      let healthPid: number | null | undefined;
       if (forceAliveCheck || serviceStatus?.running || effectiveDataMode === "remote") {
         try {
           const ping = await fetch(`${effectiveApiBaseUrl}/api/health`, { signal: AbortSignal.timeout(HEALTH_POLL_TIMEOUT_MS) });
@@ -2498,11 +2500,13 @@ function MainApp() {
               const readiness = healthData?.readiness || {};
               const ready = readiness.ready !== false;
               const phase = String(readiness.phase || healthData.startup_phase || "");
+              healthPid = typeof healthData.pid === "number" ? healthData.pid : undefined;
               if (ready) clearBackendStartingHold();
               setBackendBootPhase(ready ? "running" : "starting");
               setServiceStatus((prev) => ({
                 ...(prev || { pid: healthData.pid || null, pidFile: "" }),
                 running: true,
+                pid: healthPid ?? prev?.pid ?? null,
                 heartbeatPhase: phase || prev?.heartbeatPhase,
                 heartbeatHttpReady: readiness.http_ready ?? prev?.heartbeatHttpReady,
                 heartbeatImReady: readiness.im_ready ?? prev?.heartbeatImReady,
@@ -2682,7 +2686,7 @@ function MainApp() {
             }>("openakita_service_status", { workspaceId: currentWorkspaceId });
             setServiceStatus((prev) => ({
               running: prev?.running ?? serviceAlive,
-              pid: ss.pid ?? prev?.pid ?? null,
+              pid: serviceAlive && healthPid !== undefined ? healthPid : (ss.pid ?? prev?.pid ?? null),
               pidFile: ss.pidFile ?? prev?.pidFile ?? "",
               heartbeatPhase: ss.heartbeatPhase ?? prev?.heartbeatPhase,
               heartbeatHttpReady: ss.heartbeatHttpReady ?? prev?.heartbeatHttpReady,
