@@ -5365,6 +5365,11 @@ class OrgRuntime:
                     plugin_ok = True
                 try:
                     ws = getattr(agent, "_org_context", {}).get("workspace")
+                    plugin_id = self._plugin_id_for_tool(agent, tool_name)
+                    logger.debug(
+                        "[OrgRuntime] plugin asset hook fired: org=%s node=%s tool=%s plugin=%s",
+                        org_id, node_id, tool_name, plugin_id or "plugin",
+                    )
                     enhanced = await self._record_plugin_asset_output(
                         agent, org_id, node_id, tool_name, tool_input, result,
                         workspace=ws,
@@ -5372,8 +5377,10 @@ class OrgRuntime:
                     if enhanced is not None:
                         result = enhanced
                 except Exception:
-                    logger.debug(
-                        "[OrgRuntime] failed to record plugin asset output",
+                    logger.warning(
+                        "[OrgRuntime] failed to record plugin asset output "
+                        "(org=%s node=%s tool=%s)",
+                        org_id, node_id, tool_name,
                         exc_info=True,
                     )
                 self._touch_trackers_for_org(org_id)
@@ -5917,6 +5924,13 @@ class OrgRuntime:
         so the lookup is O(1) per call. Re-computation only happens when the
         attribute is missing — at which point we walk
         ``agent._plugin_manager.loaded_plugins.values()`` once.
+
+        ``PluginAPI._registered_tools`` is ``list[str]`` in production
+        (see ``src/openakita/plugins/api.py``); historically this helper
+        treated entries as dicts and so produced an empty set, silently
+        disabling :py:meth:`_record_plugin_asset_output` for every plugin
+        tool. We now accept both shapes so the asset-registration hook
+        actually fires for the real PluginAPI list-of-strings shape.
         """
         if not tool_name or tool_name.startswith("org_"):
             return False
@@ -5928,11 +5942,14 @@ class OrgRuntime:
                 try:
                     for lp in pm.loaded_plugins.values():
                         for t in getattr(lp.api, "_registered_tools", None) or []:
-                            n = t.get("name") if isinstance(t, dict) else None
-                            if n:
-                                cached.add(n)
+                            if isinstance(t, str) and t:
+                                cached.add(t)
+                            elif isinstance(t, dict):
+                                n = t.get("name")
+                                if isinstance(n, str) and n:
+                                    cached.add(n)
                 except Exception:
-                    logger.debug(
+                    logger.warning(
                         "[OrgRuntime] failed to enumerate plugin tool names",
                         exc_info=True,
                     )
@@ -5946,6 +5963,9 @@ class OrgRuntime:
         Returns the plugin id, or an empty string if the mapping cannot be
         established (e.g. PluginManager not attached). The result is only
         used for namespacing the on-disk asset directory.
+
+        Accepts both ``list[str]`` (PluginAPI's actual shape) and
+        ``list[dict]`` so legacy callers / tests keep working.
         """
         pm = getattr(agent, "_plugin_manager", None)
         if pm is None:
@@ -5953,7 +5973,10 @@ class OrgRuntime:
         try:
             for lp in pm.loaded_plugins.values():
                 for t in getattr(lp.api, "_registered_tools", None) or []:
-                    if isinstance(t, dict) and t.get("name") == tool_name:
+                    if isinstance(t, str):
+                        if t == tool_name:
+                            return lp.manifest.id
+                    elif isinstance(t, dict) and t.get("name") == tool_name:
                         return lp.manifest.id
         except Exception:
             return ""
