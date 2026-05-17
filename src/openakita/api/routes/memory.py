@@ -59,7 +59,20 @@ def _get_manager(request: Request):
 
 
 def _sync_json(request: Request):
-    """After store mutations, reload manager's in-memory cache and flush to JSON."""
+    """Force a full cache reload from SQLite.
+
+    Historically every mutation route called this so the in-memory cache
+    on ``MemoryManager`` did not lag behind the DB. As of v4.1, the cache
+    is kept coherent automatically through a store-observer registered in
+    ``MemoryManager.__init__`` — single-row creates / updates / deletes
+    NO LONGER need this O(N) full-reload, and the cheap routes have
+    stopped calling it.
+
+    The function is retained for the few legitimate callers that perform
+    bulk multi-step writes through the LLM review pipeline (which still
+    benefit from a single reload at the end as a defensive resync) and
+    for any out-of-tree callers that still depend on it.
+    """
     mm = _get_manager(request)
     if mm and hasattr(mm, "_reload_from_sqlite"):
         mm._reload_from_sqlite()
@@ -420,7 +433,11 @@ def _mark_legacy_reviewed(store: Any, mem: Any, reason: str, superseded_by: str 
     }
     if superseded_by:
         updates["superseded_by"] = superseded_by
-    store.db.update_memory(mem.id, updates)
+    # Route through ``update_semantic`` so the store observer fires and the
+    # FTS index gets reindexed on tag changes. The pre-Path-A bypass via
+    # ``store.db.update_memory`` left both stale and was only saved by the
+    # ``_sync_json`` reload at the end of the claim-legacy route.
+    store.update_semantic(mem.id, updates)
 
 
 def _safe_import_legacy_memories(
@@ -485,7 +502,9 @@ def _safe_import_legacy_memories(
             "confidence": min(float(getattr(mem, "confidence", 0.5) or 0.5), 0.7),
             "tags": _normalize_legacy_tags(mem, "legacy_imported"),
         }
-        if store.db.update_memory(mem.id, updates):
+        # See ``_mark_legacy_reviewed`` rationale — go through update_semantic
+        # so the observer + search-index reindex run uniformly.
+        if store.update_semantic(mem.id, updates):
             promoted_ids.add(mem.id)
 
     return {
@@ -541,7 +560,7 @@ async def create_memory(request: Request, body: MemoryCreateRequest):
                 user_id=user_id,
                 workspace_id=workspace_id,
             )
-        _sync_json(request)
+        # Cache coherence is handled by the store observer; no manual reload.
         return {"status": "ok", "id": mem_id}
     except HTTPException:
         raise
@@ -898,7 +917,7 @@ async def batch_delete(request: Request):
         if store.delete_semantic(mid):
             deleted += 1
 
-    _sync_json(request)
+    # Observer fires per-id during the loop above; no full reload needed.
     return {"deleted": deleted, "total": len(ids)}
 
 
@@ -1066,20 +1085,27 @@ async def update_memory(request: Request, memory_id: str, body: MemoryUpdateRequ
     ok = store.update_semantic(memory_id, updates)
     if not ok:
         raise HTTPException(404, "Memory not found")
-    _sync_json(request)
+    # Observer keeps MemoryManager._memories in sync.
     return {"ok": True}
 
 
 @router.delete("/{memory_id}")
 async def delete_memory(request: Request, memory_id: str):
+    # Route through MemoryManager.delete_memory so the cache mirror, vector
+    # index, and any plugin-attached vector store are all touched through a
+    # single chokepoint. Falls back to direct store.delete_semantic only when
+    # the manager is unavailable (degraded mode).
+    mm = _get_manager(request)
+    if mm is not None and hasattr(mm, "delete_memory"):
+        if not mm.delete_memory(memory_id):
+            raise HTTPException(404, "Memory not found")
+        return {"ok": True}
+
     store = _get_store(request)
     if not store:
         raise HTTPException(503, "Memory store not available")
-
-    ok = store.delete_semantic(memory_id)
-    if not ok:
+    if not store.delete_semantic(memory_id):
         raise HTTPException(404, "Memory not found")
-    _sync_json(request)
     return {"ok": True}
 
 

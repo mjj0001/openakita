@@ -237,4 +237,59 @@ sqlite3 ~/.openakita/openakita.db \
 | `AgentProfile(memory_isolation="isolated")` 直接 kwarg 构造抛 `TypeError` | 直接构造 dataclass 的第三方扩展代码 | `from_dict` / API / 工具入参均接受新名，**生产代码应该走这三条之一** | v1.30 把字段重命名 + 删 alias |
 | 多用户 IM 共享 `data/react_traces/` 和 `data/memory/conversation_history/` 时，文件按 session_id 命名 | 多用户 IM 共享同一 OPENAKITA_DATA_DIR 部署 | Phase 2b.5 二次审计已加 `iter_owned_session_ids` allow-set 过滤，stem 不在 owner 已登记 session 列表内的文件直接跳过 | 已堵；后续做按 user_id 分目录归档作为深度防御 |
 
+### 8.2 v4.1 缓存一致性重构（Path A，已落地）
+
+**背景：** 用户报告"删除记忆失败"的 bug —— `MemoryManager.delete_memory(id)` 只在 `_memories` 缓存里命中时才走 DB 删除，
+对于 lifecycle 后台合成、API POST 直写等"绕开 manager"的写入路径，缓存里没有这条记录 → 删除直接返回 `False`，
+DB 里的行被静默漏删。深挖发现这不只是一个 bug，而是 v4 把 SQLite 当 source-of-truth 后，`_memories` 缓存的写入、读取、
+失效路径仍然散落在 manager / lifecycle / API / 各种 review 流程里，**没有人是"唯一的 cache owner"**。
+
+**修法（Path A）：** 在 `UnifiedStore` 上加一个 observer pattern：
+
+```
+UnifiedStore.save_semantic()    ─┐
+UnifiedStore.update_semantic()  ─┼──→ self._fire(kind, payload)  ──→ MemoryManager._on_store_event()
+UnifiedStore.delete_semantic()  ─┤                                          │
+UnifiedStore.cleanup_expired()  ─┘                                          ▼
+                                                            self._memories[id] = mem  / pop(id)
+```
+
+- `UnifiedStore` 是 DB-mutation 的唯一事件源；每个成功提交后同步触发 observer；
+- `MemoryManager` 在 `__init__` 里 `self.store.register_observer(self._on_store_event)`，
+  observer 内部独立加锁，幂等，异常被吞掉不影响写入；
+- `MemoryManager.delete_memory` 重写成 thin wrapper：直接 `store.delete_semantic`，observer 自动清缓存；
+  保留了对 cache-only 残影的 self-heal 兜底；
+- HTTP `DELETE /api/memories/{id}` 改为优先走 `MemoryManager.delete_memory`，保证 vector store / 插件 backend 一并触达；
+- 单条 create / update / delete 的 `_sync_json(request)` 全部下线（observer 已经做了增量同步，O(N) full reload 是浪费）；
+- 仅保留 `claim-legacy` 和 LLM review 完成后的 `_sync_json` 作为**多步骤批量写**后的防御性兜底。
+
+**保留的已知 debt（不在 Path A 范围内）：**
+
+- `MemoryManager.add_memory` v1 兼容路径在 `_memories_lock` 内做 in-flight 去重检查，
+  会在 `store.save_semantic` 调用**前**先写一遍 `_memories[id] = memory`（pre-commit），
+  observer 之后再 idempotent 覆盖一次。
+  代价是如果 DB 写失败，缓存里会有一条短暂的 ghost（下次 `_reload_from_sqlite` 修复）。
+  保留是因为去掉它会让两个并发 `add_memory(near-duplicate)` 走到去重门外，需要更大重写。
+- `vector_store.add_memory` 在 `add_memory` 中是直调，不经 `UnifiedStore`。
+  这块仍是 manager 自己负责的副效应，没有纳入 observer。
+- `_memories` 仍是"全量 cache"语义：进程启动时 `_load_from_sqlite()` 一次性灌满。
+  对于超大库（>百万记忆）这是内存问题，但 v4 范围内的优化（lazy/LRU 化缓存）属于 v1.29 议程。
+- `UnifiedStore.bump_access` 和 `get_semantic` 内部用 `self.db.update_memory(...)` 给
+  `access_count` / `last_accessed_at` 做计数自增，**不触发 observer**：这是热路径，每次检索都跑，
+  缓存里的 access_count 因此会和 DB 略有偏差。但所有依赖 access_count 做评分的代码都走
+  `store.search_semantic` 直读 DB，不读 cache.access_count，所以这点偏差不影响功能。
+- **`MemoryStorage.get_memory` 没有持 `_lock`**（pre-existing bug，不是 Path A 引入）：
+  和 `save_memory` / `update_memory` 并发会偶发 SQLite "bad parameter or other API misuse"。
+  实际链路里 manager 的写操作经 `_memories_lock` 串行化、`UnifiedStore` 的 dedup 检查也基本单线程，
+  桌面 / 单进程场景命中概率极低；多线程高并发写入（比如未来的 IM 群批量入库）会暴露这点。
+  v1.29 应该在 `MemoryStorage.get_memory` / `get_*` 上加读锁或换 connection pool。
+
+**v1.29 候选 — Path B（消除缓存）：** 让 `_memories` 退化成 LRU 或者直接干掉，所有读取都走 SQLite + FTS5/向量索引。
+这条路一致性最干净（无 cache 就无 desync），代价是改动面更大（`iter_cached` / persona 加载 / dedup 检查全要重新写），
+需要先评估 SQLite 直查的 P99 延迟是否能撑住默认 retrieval 路径。Path A 已经把"class of cache-desync bugs"按掉，
+Path B 是优化项，不是修 bug。
+
+**回归覆盖：** `tests/unit/test_memory_v4_migration_and_isolation.py` 末尾新增 7 个 observer / cache-coherence 测例，
+包括 observer 异常隔离、dedup 短路不重复触发、外部直写自动入缓存、外部直删自动出缓存、用户报告的 ghost-row 删除等场景。
+
 如果你在升级过程中遇到异常，请走 `openakita bugreport` 收集崩溃信息后提交 issue。

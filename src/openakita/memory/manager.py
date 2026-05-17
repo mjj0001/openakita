@@ -31,6 +31,7 @@ import re
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from ..core.log_health import record_health_event
 from .consolidator import MemoryConsolidator
@@ -277,6 +278,15 @@ class MemoryManager:
             )
             # v2: Retrieval Engine (with brain for LLM query decomposition)
             self.retrieval_engine = RetrievalEngine(self.store, brain=brain)
+            # Subscribe to DB write events: every successful save/update/delete
+            # going through ``self.store`` now keeps ``self._memories`` coherent
+            # automatically — including writes from LifecycleManager, API
+            # routes, plugins, or any other caller that holds a UnifiedStore
+            # reference. This eliminates the previous ad-hoc cache-update
+            # pattern scattered across MemoryManager and the
+            # ``_sync_json``/``_reload_from_sqlite`` ceremony in HTTP routes.
+            with contextlib.suppress(Exception):
+                self.store.register_observer(self._on_store_event)
             # Load existing memories
             self._load_memories()
             self._maybe_schedule_snapshot()
@@ -297,6 +307,29 @@ class MemoryManager:
             with contextlib.suppress(Exception):
                 record_health_event("memory_degraded", {"reason": e.reason})
             emit_memory_health_event("degraded", {"reason": e.reason})
+
+    def _on_store_event(self, kind: str, payload: Any) -> None:
+        """Observer mirror for ``UnifiedStore`` semantic writes.
+
+        Keeps the in-memory ``_memories`` cache in lock-step with SQLite for
+        every write path — including ones that bypass MemoryManager entirely.
+
+        Idempotent and safe to call when the id is already absent (delete) or
+        already present (upsert overwrites with fresher state).
+        """
+        if not isinstance(kind, str):
+            return
+        try:
+            with self._memories_lock:
+                if kind == "upsert":
+                    if payload is not None and getattr(payload, "id", None):
+                        self._memories[payload.id] = payload
+                elif kind == "delete":
+                    mem_id = payload if isinstance(payload, str) else getattr(payload, "id", None)
+                    if mem_id:
+                        self._memories.pop(mem_id, None)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[Manager] _on_store_event %s failed: %s", kind, exc)
 
     def _maybe_schedule_snapshot(self) -> None:
         try:
@@ -710,14 +743,13 @@ class MemoryManager:
                 continue
             if self._identity_slot_for(old) != slot:
                 continue
+            # ``update_semantic`` re-fetches the row and fires an ``upsert``
+            # event with the fresh state, so the cached copy of ``old`` is
+            # replaced in-place by the observer. No manual mutation needed.
             self.store.update_semantic(old.id, {"superseded_by": memory.id})
-            with self._memories_lock:
-                cached = self._memories.get(old.id)
-                if cached:
-                    cached.superseded_by = memory.id
-        with self._memories_lock:
-            self._memories[memory.id] = memory
-            self._save_memories()
+        # Cache write happens via the observer; _save_memories stays for any
+        # future JSON-mirror code (currently a no-op in v4).
+        self._save_memories()
         return memory.id
 
     def _normalize_scope_for_owner(self, scope: str, source: str = "") -> tuple[str, str, str, str]:
@@ -781,10 +813,12 @@ class MemoryManager:
             workspace_id=write_workspace,
             skip_dedup=skip_dedup,
         )
+        # Cache mirror is handled by the store observer (_on_store_event);
+        # _save_memories is a no-op in v4 but kept callable in case JSON sync
+        # is restored later. We only invoke it when an actual upsert happened
+        # (i.e. dedup did not short-circuit by returning a different id).
         if saved_id == memory.id:
-            with self._memories_lock:
-                self._memories[memory.id] = memory
-                self._save_memories()
+            self._save_memories()
         return saved_id
 
     # 任务流水账识别：包含这些动词或客观操作描述的提取项几乎一定是
@@ -1734,6 +1768,13 @@ class MemoryManager:
                 except Exception:
                     pass
 
+            # Pre-commit cache write: kept (despite the store observer also
+            # populating ``_memories`` after the SQLite save below) because the
+            # dedup check above looks at ``_memories``, and two concurrent
+            # ``add_memory`` calls for near-duplicate content would otherwise
+            # race past the dedup gate before the observer fires. The
+            # subsequent observer upsert is idempotent — it overwrites with
+            # the fresh state.
             self._memories[memory.id] = memory
             self._save_memories()
 
@@ -1907,15 +1948,32 @@ class MemoryManager:
         return results[:limit]
 
     def delete_memory(self, memory_id: str) -> bool:
-        with self._memories_lock:
-            if memory_id in self._memories:
-                del self._memories[memory_id]
-                self._save_memories()
-                if self.vector_store is not None:
-                    self.vector_store.delete_memory(memory_id)
-                self.store.delete_semantic(memory_id)
-                return True
-            return False
+        """Delete a semantic memory by id.
+
+        SQLite is the source of truth. ``_memories`` is mirrored via the
+        observer registered on ``self.store``; we do not gate the DB delete
+        on cache presence (the pre-v4.1 implementation did and silently
+        leaked rows for memories that lifecycle had written between the
+        latest reload and now — see the regression test
+        ``test_delete_memory_works_for_uncached_rows``).
+        """
+        ok = bool(self.store.delete_semantic(memory_id))
+        if self.vector_store is not None:
+            # store.delete_semantic already routes through SearchBackend,
+            # which for vector-backed installs maps to the same
+            # vector_store.delete_memory call. This second call is a safety
+            # net for installs that bind vector_store as a separate plugin
+            # backend and is idempotent.
+            with contextlib.suppress(Exception):
+                self.vector_store.delete_memory(memory_id)
+        if not ok:
+            # Self-heal: if the row is no longer in DB but is still cached
+            # (rare; would only happen if the observer was bypassed earlier),
+            # drop it so iter_cached() stops returning a ghost.
+            with self._memories_lock:
+                if self._memories.pop(memory_id, None) is not None:
+                    return True
+        return ok
 
     # ==================== Plugin Memory Backends ====================
 
