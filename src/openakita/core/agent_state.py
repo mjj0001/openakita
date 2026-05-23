@@ -353,7 +353,12 @@ class TaskState:
         if self.status != TaskStatus.CANCELLED:
             try:
                 self.transition(TaskStatus.CANCELLED)
-            except ValueError:
+            except ValueError:  # cancel-idempotent-force-write
+                # cancel() MUST be idempotent and reachable from any prior
+                # state — even terminal states should re-affirm CANCELLED
+                # rather than raise.  This is architecturally permanent
+                # (not S5-B backlog); the syntax-guard test recognises
+                # this token specifically.
                 logger.warning(
                     f"[State] cancel() transition from {prev_status} not allowed, forcing CANCELLED"
                 )

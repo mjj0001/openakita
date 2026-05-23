@@ -4459,7 +4459,7 @@ class ReasoningEngine:
                         }
                         yield {"type": "done"}
                         return
-                    except ValueError:
+                    except ValueError:  # s5b-allow-force-write
                         # Belt-and-suspenders (v1.28.3-pre): post-S5-B 灰度
                         # 后这条分支理论上不可达——保留 force-write 避免
                         # 任何未识别的 race 路径让 SSE 流硬崩。
@@ -5027,7 +5027,7 @@ class ReasoningEngine:
                             state.transition(
                                 TaskStatus.FAILED if is_verify_incomplete else TaskStatus.COMPLETED
                             )
-                        except ValueError:
+                        except ValueError:  # s5b-allow-force-write
                             state.status = (
                                 TaskStatus.FAILED if is_verify_incomplete else TaskStatus.COMPLETED
                             )
@@ -5070,7 +5070,7 @@ class ReasoningEngine:
                         react_trace.append(_iter_trace)
                         try:
                             state.transition(TaskStatus.VERIFYING)
-                        except ValueError:
+                        except ValueError:  # s5b-allow-force-write
                             state.status = TaskStatus.VERIFYING
                         (
                             working_messages,
@@ -5085,7 +5085,7 @@ class ReasoningEngine:
                 elif decision.type == DecisionType.TOOL_CALLS and decision.tool_calls:
                     try:
                         state.transition(TaskStatus.ACTING)
-                    except ValueError:
+                    except ValueError:  # s5b-allow-force-write
                         state.status = TaskStatus.ACTING
 
                     working_messages.append(
@@ -5487,7 +5487,7 @@ class ReasoningEngine:
                         self._last_exit_reason = "ask_user"
                         try:
                             state.transition(TaskStatus.WAITING_USER)
-                        except ValueError:
+                        except ValueError:  # s5b-allow-force-write
                             state.status = TaskStatus.WAITING_USER
                         yield {"type": "done"}
                         return
@@ -6306,7 +6306,7 @@ class ReasoningEngine:
 
                     try:
                         state.transition(TaskStatus.OBSERVING)
-                    except ValueError:
+                    except ValueError:  # s5b-allow-force-write
                         state.status = TaskStatus.OBSERVING
 
                     # --- 截断检测（与 run() 一致）---
@@ -6647,7 +6647,7 @@ class ReasoningEngine:
                             )
                             try:
                                 state.transition(TaskStatus.FAILED)
-                            except ValueError:
+                            except ValueError:  # s5b-allow-force-write
                                 state.status = TaskStatus.FAILED
                             self._run_failure_analysis(
                                 react_trace,
@@ -6731,7 +6731,7 @@ class ReasoningEngine:
             )
             try:
                 state.transition(TaskStatus.FAILED)
-            except ValueError:
+            except ValueError:  # s5b-allow-force-write
                 state.status = TaskStatus.FAILED
             logger.info(f"[ReAct-Stream] === MAX_ITERATIONS reached ({max_iterations}) ===")
             self._run_failure_analysis(
@@ -9020,7 +9020,7 @@ class ReasoningEngine:
         # 直接覆写 status，避免在共享 TaskState 被另一个协程推到终态后崩溃。
         try:
             state.transition(TaskStatus.MODEL_SWITCHING)
-        except ValueError:
+        except ValueError:  # s5b-allow-force-write
             logger.warning(
                 "[ModelSwitch] Illegal transition %s -> MODEL_SWITCHING, "
                 "forcing status overwrite (likely concurrent task on session)",
