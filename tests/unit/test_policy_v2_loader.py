@@ -248,6 +248,75 @@ security:
         assert "validation failed" in str(exc_info.value)
 
 
+class TestV113TrustDefaultUpgradeInfo:
+    """v1.27.13 起 schema 默认 confirmation.mode 从 default 切到 trust。
+    v1 YAML 升级用户没写 mode → 静默落到 trust，是 BC。loader 在这条路径
+    必须发一条 INFO 让 operator 在日志里能定位/锁回旧行为。
+    """
+
+    def test_v1_yaml_without_mode_emits_upgrade_info(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        p = tmp_path / "v1_no_mode.yaml"
+        p.write_text(
+            "security:\n  enabled: true\n  zones:\n    workspace: ['${CWD}']\n",
+            encoding="utf-8",
+        )
+        with caplog.at_level("INFO", logger="openakita.core.policy_v2.loader"):
+            load_policies_yaml(p)
+        upgrade_msgs = [
+            r.message for r in caplog.records if "v1 schema without explicit" in r.message
+        ]
+        assert len(upgrade_msgs) == 1, (
+            f"v1 YAML 无 confirmation.mode 必须发一条 INFO; got {upgrade_msgs!r}"
+        )
+        msg = upgrade_msgs[0]
+        # 必须包含出厂默认值 + 锁回旧行为的指引
+        assert "'trust'" in msg, "INFO 必须告诉用户当前 factory default"
+        assert "confirmation.mode: default" in msg, (
+            "INFO 必须给出锁回 v1.27.x 旧行为的精确 YAML 写法"
+        )
+
+    def test_v1_yaml_with_explicit_mode_does_not_emit_upgrade_info(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """显式写了 v1 别名 (yolo/smart/cautious) 的用户走 alias 翻译，不该被打扰。"""
+        p = tmp_path / "v1_with_mode.yaml"
+        p.write_text(
+            "security:\n  enabled: true\n  zones:\n    workspace: ['${CWD}']\n"
+            "  confirmation:\n    mode: smart\n",
+            encoding="utf-8",
+        )
+        with caplog.at_level("INFO", logger="openakita.core.policy_v2.loader"):
+            load_policies_yaml(p)
+        upgrade_msgs = [
+            r.message for r in caplog.records if "v1 schema without explicit" in r.message
+        ]
+        assert upgrade_msgs == [], (
+            f"已显式写 mode 的 v1 YAML 不该发升级 INFO; got {upgrade_msgs!r}"
+        )
+
+    def test_v2_yaml_without_mode_does_not_emit_upgrade_info(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """v2 schema YAML 无 confirmation 块的用户是 v1.27.13 之后 fresh start
+        的用户，他们的预期就是 trust；不应发"BC 提示"刷屏。"""
+        p = tmp_path / "v2_no_mode.yaml"
+        p.write_text(
+            # workspace.paths 是 v2-only 字段，detect_schema_version 会判 v2
+            "security:\n  enabled: true\n  workspace:\n    paths: ['${CWD}']\n",
+            encoding="utf-8",
+        )
+        with caplog.at_level("INFO", logger="openakita.core.policy_v2.loader"):
+            load_policies_yaml(p)
+        upgrade_msgs = [
+            r.message for r in caplog.records if "v1 schema without explicit" in r.message
+        ]
+        assert upgrade_msgs == [], (
+            f"v2 YAML 不该发 v1 升级 INFO; got {upgrade_msgs!r}"
+        )
+
+
 class TestLoaderEndToEnd:
     def test_v1_yolo_with_paths_full_pipeline(self, tmp_path: Path) -> None:
         p = tmp_path / "complete_v1.yaml"
