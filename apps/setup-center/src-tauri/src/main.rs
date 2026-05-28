@@ -218,6 +218,157 @@ fn try_self_heal_relaunch(panic_msg: &str) {
     }
 }
 
+/// Diagnostic snapshot collected once at startup and read by the panic hook
+/// when writing crash.log. Filled asynchronously to avoid adding ~1s of
+/// PowerShell launch latency to the GUI startup path. Reads return
+/// "<not yet collected>" until the background thread finishes — startup-time
+/// panics still get whatever payload + backtrace we can capture.
+static MACHINE_INFO: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+fn machine_info_snapshot() -> String {
+    MACHINE_INFO
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(|| "<machine info not yet collected>".to_string())
+}
+
+/// Spawn the diagnostic collector in a background thread so the slow
+/// PowerShell calls (Windows build, WebView2 version) don't block startup.
+fn spawn_machine_info_collector() {
+    std::thread::spawn(|| {
+        let info = collect_machine_info();
+        if let Ok(mut g) = MACHINE_INFO.lock() {
+            *g = Some(info);
+        }
+    });
+}
+
+/// Diagnostic-only capture: runs a single binary with arg slice and returns
+/// trimmed stdout if non-empty. Distinct from the unrelated `run_capture` in
+/// the installer/updater path (which takes `&[String]` and returns
+/// `Result<_, String>`); this one is tuned for the panic hook's PowerShell
+/// probes — short timeouts and "no window" flags so the user never sees a
+/// cmd flash on startup.
+#[cfg(target_os = "windows")]
+fn run_capture_diag(prog: &str, args: &[&str]) -> Option<String> {
+    use std::os::windows::process::CommandExt as _;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = Command::new(prog)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Collect environment / OS / runtime fingerprint used for crash diagnosis.
+///
+/// All fields are best-effort: any individual lookup that fails is omitted
+/// rather than aborting the whole snapshot. Format is one `key: value` per
+/// line so it can be eyeballed inside crash.log without a parser.
+fn collect_machine_info() -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push(format!("pid: {}", std::process::id()));
+    lines.push(format!("app_version: {}", env!("CARGO_PKG_VERSION")));
+    lines.push(format!("os: {}", std::env::consts::OS));
+    lines.push(format!("arch: {}", std::env::consts::ARCH));
+    lines.push(format!(
+        "auto_restarted: {}",
+        std::env::args().any(|a| a == "--auto-restarted")
+    ));
+
+    if let Ok(s) = std::env::var("SESSIONNAME") {
+        lines.push(format!("session_name: {s}"));
+    }
+    if let Ok(s) = std::env::var("CLIENTNAME") {
+        lines.push(format!("client_name: {s}"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(s) = run_capture_diag("cmd", &["/c", "ver"]) {
+            lines.push(format!("windows_ver: {}", s.replace(['\r', '\n'], " "))); // single line
+        }
+        // Detailed product / display version / build.UBR via registry. Read
+        // through PowerShell so we don't have to thread a `winreg` call into
+        // the diagnostic path (winreg is already a dep but the simpler API
+        // surface keeps this snapshot path self-contained).
+        if let Some(s) = run_capture_diag(
+            "powershell.exe",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$o = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion' -ErrorAction SilentlyContinue; if ($o) { \"$($o.ProductName) | $($o.DisplayVersion) | Build $($o.CurrentBuild).$($o.UBR)\" }",
+            ],
+        ) {
+            lines.push(format!("windows_detail: {s}"));
+        }
+        // WebView2 Runtime version. Try HKLM 64-bit, HKLM 32-bit, then HKCU.
+        if let Some(s) = run_capture_diag(
+            "powershell.exe",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$paths = @('HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}','HKLM:\\SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}','HKCU:\\SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'); foreach ($p in $paths) { try { $v = (Get-ItemProperty $p -ErrorAction Stop).pv; if ($v) { Write-Output $v; break } } catch {} }",
+            ],
+        ) {
+            lines.push(format!("webview2_version: {s}"));
+        }
+        // GPU name(s) — crashes from GPU driver bugs in WebView2 are common
+        // enough on consumer machines that knowing vendor + driver version
+        // is worth the extra ~200 ms.
+        if let Some(s) = run_capture_diag(
+            "powershell.exe",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { \"$($_.Name) [$($_.DriverVersion) $($_.DriverDate)]\" } | Select-Object -First 4",
+            ],
+        ) {
+            // Multi-GPU machines: keep them on one logical line, separated by ` | `.
+            let joined = s
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            if !joined.is_empty() {
+                lines.push(format!("gpu: {joined}"));
+            }
+        }
+    }
+
+    lines.join("\n")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_capture_diag(_prog: &str, _args: &[&str]) -> Option<String> {
+    None
+}
+
+/// Convert a panic payload (`&dyn Any + Send`) into a printable string.
+/// Covers the two common cases (`&'static str`, `String`); falls back to a
+/// placeholder for the rare `panic_any(custom)` style payloads.
+fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "<non-string panic payload>".to_string()
+}
+
 static ROOT_CONFIG_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static STATE_FILE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -4901,6 +5052,20 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(1500));
     }
 
+    // Force enable Rust backtrace so any panic — not just ones flagged as
+    // tao#1180 — produces a usable trace inside crash.log. We additionally
+    // capture via `Backtrace::force_capture()` in the hook, but setting the
+    // env var also makes the libstd default hook print to stderr, which is
+    // visible in dev builds and from the parent shell when launched via CLI.
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        std::env::set_var("RUST_BACKTRACE", "1");
+    }
+
+    // Asynchronously gather Windows build / WebView2 version / GPU info so
+    // the slow PowerShell calls don't block GUI startup. Result is read by
+    // the panic hook when writing crash.log.
+    spawn_machine_info_collector();
+
     // Native crash handler: capture SEH exceptions (access violation /
     // heap corruption / illegal instruction) to ~/.openakita/crashdumps/
     // *.dmp.  std::panic::set_hook only sees Rust panics, not C-level
@@ -4916,16 +5081,41 @@ fn main() {
     // restart.marker 并立刻 spawn 一份自身进程接力。新进程靠
     // tauri-plugin-single-instance 保证只有一个活实例，旧进程随后崩溃。
     // 上游修复后此自愈可拆除（见 Cargo.toml TODO 标记）。
+    //
+    // The hook records four diagnostic axes for every panic:
+    //   1. Source location (file:line:col) via PanicHookInfo::location()
+    //   2. Payload string via panic_payload_to_string() (no formatting noise)
+    //   3. Forced Rust backtrace via std::backtrace::Backtrace::force_capture()
+    //      — runs regardless of RUST_BACKTRACE so users don't have to opt in
+    //   4. Machine fingerprint snapshot (Windows build, WebView2, GPU, RDP
+    //      session marker, --auto-restarted flag) collected at startup
+    //
+    // These four axes let us distinguish three observed crash classes purely
+    // from a user-submitted crash.log (no .dmp needed for axes 1-2-4):
+    //   * tao#1180 ("cannot move state from Destroyed")
+    //   * Other Rust panics (plugin race, unwrap-on-None, assertion failure)
+    //   * SEH-only crashes (no entry in crash.log → see crashdumps/*.dmp)
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let msg = format!("PANIC: {info}");
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let payload = panic_payload_to_string(info.payload());
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let machine = machine_info_snapshot();
+        let msg = format!(
+            "PANIC at {location}\n\
+             Message: {payload}\n\n\
+             === Machine info ===\n{machine}\n\n\
+             === Backtrace ===\n{backtrace}"
+        );
         eprintln!("{msg}");
         write_crash_log(&msg, true);
-        let panic_str = info.to_string();
-        if panic_str.contains("cannot move state from Destroyed")
-            || panic_str.contains("tao") && panic_str.contains("Destroyed")
+        if payload.contains("cannot move state from Destroyed")
+            || (payload.contains("tao") && payload.contains("Destroyed"))
         {
-            try_self_heal_relaunch(&panic_str);
+            try_self_heal_relaunch(&payload);
         }
         default_hook(info);
     }));
