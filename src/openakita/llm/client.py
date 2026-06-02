@@ -1200,7 +1200,8 @@ class LLMClient:
                     hint = _friendly_error_hint(quota_or_auth)
                     raise AllEndpointsFailedError(
                         f"All endpoints failed with {'/'.join(categories)} errors. "
-                        f"{hint} Last error: {last_err}"
+                        f"{hint} Last error: {last_err}",
+                        error_categories=set(categories),
                     )
 
             # ── 降级 3: "最后防线旁路" — 绕过冷静期（对齐 Portkey） ──
@@ -1228,7 +1229,8 @@ class LLMClient:
             hint = _friendly_error_hint(base_capability_matched)
             raise AllEndpointsFailedError(
                 f"All endpoints failed with {'/'.join(categories)} errors. "
-                f"{hint} Last error: {last_err}"
+                f"{hint} Last error: {last_err}",
+                error_categories=set(categories),
             )
 
         # ── 降级 4: 最终兜底 — 尝试所有端点 ──
@@ -2045,6 +2047,7 @@ class LLMClient:
         raise AllEndpointsFailedError(
             f"All endpoints failed: {'; '.join(errors)}\n{hint}",
             is_structural=all_structural,
+            error_categories={fp.error_category for fp in failed_providers if fp.error_category},
         )
 
     def _try_self_heal(self, error: LLMError, request: LLMRequest, provider) -> bool:

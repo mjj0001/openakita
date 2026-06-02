@@ -1964,11 +1964,14 @@ class OrgRuntime:
         from openakita.llm.types import AllEndpointsFailedError
 
         if isinstance(error, AllEndpointsFailedError):
-            return bool(error.error_categories & {"quota", "auth"})
+            cats = getattr(error, "error_categories", None) or set()
+            if cats:
+                return bool(cats & {"quota", "auth"})
         err_lower = str(error).lower()
         return any(kw in err_lower for kw in [
             "insufficient balance", "insufficient_balance", "quota",
             "billing", "(402)", "payment required",
+            "unauthorized", "authorization required",
         ])
 
     async def _pause_org_for_quota(self, org: Organization, error: Exception) -> bool:
