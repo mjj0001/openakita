@@ -181,3 +181,4 @@ Examples:
 - The `prompt/compiler.py` must be re-run when identity files change; `builder.py` auto-detects staleness via `check_compiled_outdated()`.
 - Skill loading order: `__builtin__` → workspace → `.cursor/skills` → `.claude/skills` → `skills/` → global home dirs.
 - `multi_agent_enabled` defaults to `True` and is always on; the toggle has been removed.
+- Temporary files (diffs, crash dumps, scripts, downloads) go in `tools-tmp/` — never the repo root. The directory is git-ignored. Never use `git add -A`; always stage files by explicit path.

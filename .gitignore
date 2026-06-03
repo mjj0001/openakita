@@ -362,7 +362,8 @@ plugins/subtitle-craft/validation_scripts/
 
 # 本地 QA / 探针（exploratory_report、explore_runs 等）
 _qa/
-tools-tmp/
+tools-tmp/*
+!tools-tmp/README.md
 # tests/e2e/ 下以下划线开头的探针（pytest 不收集，但容易被 git status 污染）
 tests/e2e/_*.py
 
@@ -377,6 +378,7 @@ route_stats.md
 
 # 反馈下载（含 LLM 请求/响应、PII，二进制 zip）
 .feedback-downloads/
+feedback-downloads/
 
 # 误打包的插件 zip（plugins/<name>/ui/dist/ 仍走白名单保留）
 plugins/plugins.zip
