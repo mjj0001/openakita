@@ -65,7 +65,10 @@ class TestGenerateEnvContent:
     def test_env_contains_agent_settings(self, wizard):
         wizard.config = {}
         content = wizard._generate_env_content()
-        assert "AGENT_NAME=OpenAkita" in content
+        # Agent display name is owned by AgentProfile (Agents menu), not by .env.
+        # The wizard must NOT seed an AGENT_NAME line, otherwise existing forks
+        # silently revert to "OpenAkita" on first launch.
+        assert "AGENT_NAME=" not in content
         assert "AUTO_CONFIRM=false" in content
         assert "DATABASE_PATH=data/agent.db" in content
 
