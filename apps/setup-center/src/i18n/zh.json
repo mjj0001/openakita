@@ -1140,23 +1140,7 @@
     "multiAgentMode": "多Agent模式",
     "multiAgentBeta": "Beta",
     "multiAgentOn": "多Agent模式已默认常开",
-    "multiAgentOff": "多Agent模式已默认常开",
-    "cliTitle": "CLI 命令行工具",
-    "cliDesc": "管理终端命令注册，注册后可在 CMD / PowerShell / 终端中直接使用 oa 或 openakita 命令。",
-    "cliRegistered": "已注册命令",
-    "cliInPath": "已在 PATH 中",
-    "cliNotInPath": "未在 PATH 中",
-    "cliDirLabel": "目录:",
-    "cliCmdFull": "完整命令",
-    "cliCmdShort": "简短别名",
-    "cliAddToPath": "添加到系统 PATH",
-    "cliUpdate": "更新注册",
-    "cliRegister": "注册",
-    "cliUnregisterAll": "注销全部",
-    "cliSelectOne": "请至少选择一个命令名称",
-    "cliStatusError": "查询 CLI 状态失败:",
-    "cliRegisterFailed": "注册失败:",
-    "cliUnregisterFailed": "注销失败:"
+    "multiAgentOff": "多Agent模式已默认常开"
   },
   "toolsWebSearch": {
     "sectionTitle": "网页搜索源（Web Search Source）",
@@ -1709,19 +1693,9 @@
       "skipShort": "跳过"
     },
     "system": {
-      "title": "终端命令与系统设置",
-      "desc": "注册命令行工具，配置开机自启等系统选项。",
-      "startInstall": "开始安装",
-      "cmdFull": "完整命令名称",
-      "cmdShort": "简短别名，推荐日常使用",
-      "recommended": "推荐",
-      "addToPath": "添加到系统 PATH",
-      "addToPathDesc": "新打开的终端中可直接输入命令名运行，无需完整路径",
-      "cmdExamples": "安装后可使用的命令示例",
-      "commentServe": "# 启动后端服务",
-      "commentStatus": "# 查看运行状态",
-      "commentRun": "# 单次对话",
-      "commentInit": "# 初始化工作区"
+      "title": "系统设置",
+      "desc": "配置开机自启等系统选项。",
+      "startInstall": "开始安装"
     },
     "registerBots": "注册 IM Bot ({{count}} 个)",
     "autostart": {

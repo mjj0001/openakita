@@ -53,7 +53,6 @@ tauri-plugin-notification = "2"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-winreg = "0.55"
 # Used by src/crash_handler.rs to install SetUnhandledExceptionFilter +
 # MiniDumpWriteDump for native crashes (0xc0000005 / 0xc0000374 / 0xc000001d).
 # Dumps land in ~/.openakita/crashdumps/openakita-{pid}-{ts}.dmp and are

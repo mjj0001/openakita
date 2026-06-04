@@ -426,12 +426,6 @@ Var EnvCleanUserData
 Var EnvCleanUserDataConfirmed
 Page custom PageEnvCheck PageLeaveEnvCheck
 
-; 6.6 CLI 命令行工具配置页面
-Var CliCheckOpenakita
-Var CliCheckOa
-Var CliCheckPath
-Page custom PageCliSetup PageLeaveCliSetup
-
 ; 7. Installation page
 !insertmacro MUI_PAGE_INSTFILES
 
@@ -527,65 +521,6 @@ Function PageLeaveEnvCheck
  ${EndIf}
 FunctionEnd
 
-; ── CLI 命令行工具配置页面实现 ──
-Function PageCliSetup
- ; passive/silent/update 模式跳过
- ${If} $PassiveMode = 1
-  Abort
- ${EndIf}
- ${If} $UpdateMode = 1
-  Abort
- ${EndIf}
- ; Legacy migration: skip page, old CLI preferences are restored
- ${If} $LegacyInstallDir != ""
-  Abort
- ${EndIf}
-
- !insertmacro MUI_HEADER_TEXT "$(cliHeaderTitle)" "$(cliHeaderSubtitle)"
-
- nsDialogs::Create 1018
- Pop $0
- ${IfThen} $0 == "error" ${|} Abort ${|}
- ${IfThen} $(^RTL) = 1 ${|} nsDialogs::SetRTL $(^RTL) ${|}
-
- ${NSD_CreateLabel} 0 0 100% 26u "$(cliHeaderLabel)"
- Pop $0
-
- ${NSD_CreateCheckbox} 14u 34u -14u 12u "$(cliCheckOpenakitaLabel)"
- Pop $CliCheckOpenakita
- ${NSD_SetState} $CliCheckOpenakita ${BST_CHECKED}
-
- ${NSD_CreateCheckbox} 14u 50u -14u 12u "$(cliCheckOaLabel)"
- Pop $CliCheckOa
- ${NSD_SetState} $CliCheckOa ${BST_CHECKED}
-
- ${NSD_CreateCheckbox} 14u 74u -14u 12u "$(cliCheckPathLabel)"
- Pop $CliCheckPath
- ${NSD_SetState} $CliCheckPath ${BST_CHECKED}
-
- ${NSD_CreateLabel} 22u 90u -22u 20u "$(cliPathHint)"
- Pop $0
- SetCtlColors $0 "888888" "transparent"
-
- ${NSD_CreateLabel} 14u 116u -14u 32u "$(cliExamples)"
- Pop $0
-
- nsDialogs::Show
-FunctionEnd
-
-Function PageLeaveCliSetup
- ; 读取用户选择，保存到变量供 Install Section 使用
- ; 选择状态在 Section Install 中通过注册表读取 checkbox 控件状态
-
- ; 将选择写入注册表，供 Install Section 和后续更新使用
- ${NSD_GetState} $CliCheckOpenakita $0
- WriteRegDWORD HKCU "Software\OpenAkita\CLI" "openakita" $0
- ${NSD_GetState} $CliCheckOa $0
- WriteRegDWORD HKCU "Software\OpenAkita\CLI" "oa" $0
- ${NSD_GetState} $CliCheckPath $0
- WriteRegDWORD HKCU "Software\OpenAkita\CLI" "addToPath" $0
-FunctionEnd
-
 ; Uninstaller Pages
 ; 1. Confirm uninstall page
 Var DeleteAppDataCheckbox
@@ -659,24 +594,6 @@ LangString envConfirmFirst ${LANG_SIMPCHINESE} "您选择了清除用户数据�
 LangString envConfirmFirst ${LANG_ENGLISH} "You chose to remove user data. This will permanently delete all chat history, workspaces and personal settings!$\n$\nThis action cannot be undone. Continue?"
 LangString envConfirmFinal ${LANG_SIMPCHINESE} "最终确认：请点击「确定」以确认清除全部用户数据。$\n$\n点击「取消」可返回重新选择。"
 LangString envConfirmFinal ${LANG_ENGLISH} "Final confirmation: Click OK to confirm removal of all user data.$\n$\nClick Cancel to go back."
-
-; PageCliSetup — CLI Tools
-LangString cliHeaderTitle ${LANG_SIMPCHINESE} "命令行工具"
-LangString cliHeaderTitle ${LANG_ENGLISH} "Command Line Tools"
-LangString cliHeaderSubtitle ${LANG_SIMPCHINESE} "选择要注册的终端命令"
-LangString cliHeaderSubtitle ${LANG_ENGLISH} "Choose which terminal commands to register"
-LangString cliHeaderLabel ${LANG_SIMPCHINESE} "选择要注册的终端命令，安装后可在 CMD / PowerShell / Windows Terminal 中直接使用。"
-LangString cliHeaderLabel ${LANG_ENGLISH} "Select terminal commands to register. After installation you can use them directly in CMD / PowerShell / Windows Terminal."
-LangString cliCheckOpenakitaLabel ${LANG_SIMPCHINESE} "注册 openakita 命令"
-LangString cliCheckOpenakitaLabel ${LANG_ENGLISH} "Register openakita command"
-LangString cliCheckOaLabel ${LANG_SIMPCHINESE} "注册 oa 命令（简短别名）"
-LangString cliCheckOaLabel ${LANG_ENGLISH} "Register oa command (short alias)"
-LangString cliCheckPathLabel ${LANG_SIMPCHINESE} "添加到系统 PATH 环境变量"
-LangString cliCheckPathLabel ${LANG_ENGLISH} "Add to system PATH environment variable"
-LangString cliPathHint ${LANG_SIMPCHINESE} "提示：添加到 PATH 后，新打开的终端中可直接输入 oa 或 openakita 运行命令。"
-LangString cliPathHint ${LANG_ENGLISH} "Tip: After adding to PATH, you can type oa or openakita directly in any new terminal window."
-LangString cliExamples ${LANG_SIMPCHINESE} "命令示例：$\n  oa serve    — 启动后端服务$\n  oa status   — 查看运行状态$\n  openakita run — 单次执行"
-LangString cliExamples ${LANG_ENGLISH} "Examples:$\n  oa serve    — Start backend service$\n  oa status   — Check running status$\n  openakita run — Run a single task"
 
 ; Diagnostic-only warning surfaced by NSIS_HOOK_PREINSTALL / PREUNINSTALL in hooks.nsh
 ; via DetailPrint when _oa_kill.ps1 could not confirm every *.dll/*.pyd/*.exe was
@@ -975,72 +892,21 @@ Section Install
  Call CreateOrUpdateDesktopShortcut
  ${EndIf}
 
- ; ── CLI 命令行工具注册 ──
- ; 读取用户在 PageCliSetup 中的选择（存储在注册表中）
- ; 对于 Update/Passive/Silent 模式，尝试读取上次的选择
- ReadRegDWORD $R1 HKCU "Software\OpenAkita\CLI" "openakita"
- ReadRegDWORD $R2 HKCU "Software\OpenAkita\CLI" "oa"
- ReadRegDWORD $R3 HKCU "Software\OpenAkita\CLI" "addToPath"
-
- ; 如果注册表中没有值（首次安装且跳过了页面，如 silent 模式），默认全部启用
- ${If} $R1 == ""
-  StrCpy $R1 ${BST_CHECKED}
- ${EndIf}
- ${If} $R2 == ""
-  StrCpy $R2 ${BST_CHECKED}
- ${EndIf}
- ${If} $R3 == ""
-  StrCpy $R3 ${BST_CHECKED}
- ${EndIf}
-
- ; 判断是否需要创建 bin 目录
- ${If} $R1 = ${BST_CHECKED}
- ${OrIf} $R2 = ${BST_CHECKED}
-  CreateDirectory "$INSTDIR\bin"
-
-  ; 写入 openakita.cmd
-  ${If} $R1 = ${BST_CHECKED}
-   FileOpen $R4 "$INSTDIR\bin\openakita.cmd" w
-   FileWrite $R4 '@echo off$\r$\n"%~dp0..\resources\openakita-server\openakita-server.exe" %*$\r$\n'
-   FileClose $R4
-  ${EndIf}
-
-  ; 写入 oa.cmd
-  ${If} $R2 = ${BST_CHECKED}
-   FileOpen $R4 "$INSTDIR\bin\oa.cmd" w
-   FileWrite $R4 '@echo off$\r$\n"%~dp0..\resources\openakita-server\openakita-server.exe" %*$\r$\n'
-   FileClose $R4
-  ${EndIf}
-
-  ; 添加到 PATH（通过 PowerShell 安全操作，避免 NSIS 字符串截断和类型变更问题）
-  ; add 动作内部已集成"扫除所有旧 OpenAkita bin 条目"逻辑，
-  ; 一步完成清理+添加，解决多次换目录安装导致 PATH 堆积的 bug。
-  ${If} $R3 = ${BST_CHECKED}
-   !insertmacro _OpenAkita_WritePathHelper
-   ; 清理+添加：同时操作两个 hive，确保不论之前是 perMachine 还是 currentUser 都能清理
-   nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\_oa_pathhelper.ps1" -Action add -BinDir "$INSTDIR\bin" -RegPath "HKCU:\Environment"'
-   Pop $R9
-   !if "${INSTALLMODE}" == "perMachine"
-    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\_oa_pathhelper.ps1" -Action add -BinDir "$INSTDIR\bin" -RegPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"'
-    Pop $R9
-   !endif
-   SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
-  ${Else}
-   ; 用户取消了 PATH 勾选：仍需扫除旧条目（通过 remove 动作）
-   ReadRegStr $R6 HKCU "Software\OpenAkita\CLI" "binDir"
-   ${If} $R6 != ""
-    !insertmacro _OpenAkita_WritePathHelper
-    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\_oa_pathhelper.ps1" -Action remove -BinDir "$R6" -RegPath "HKCU:\Environment"'
-    Pop $R9
-    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\_oa_pathhelper.ps1" -Action remove -BinDir "$R6" -RegPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"'
-    Pop $R9
-    SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
-   ${EndIf}
-  ${EndIf}
-
-  ; 保存 INSTDIR 到注册表（卸载时需要知道 bin 目录位置）
-  WriteRegStr HKCU "Software\OpenAkita\CLI" "binDir" "$INSTDIR\bin"
- ${EndIf}
+ ; ── 清理旧版 CLI 命令行工具注册 ──
+ ; 命令行工具（oa / openakita 命令注册 + PATH 注入）已下线。覆盖安装时
+ ; 必须对 HKCU + HKLM 两个 hive 都做 sweep，否则换目录多次安装会在某一
+ ; hive 里留下历史 bin 条目（v1.27.16 的 add 动作只扫除正在写入的那个 hive）。
+ !insertmacro _OpenAkita_WritePathHelper
+ nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\_oa_pathhelper.ps1" -Action sweep -BinDir "" -RegPath "HKCU:\Environment"'
+ Pop $R9
+ nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\_oa_pathhelper.ps1" -Action sweep -BinDir "" -RegPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"'
+ Pop $R9
+ SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
+ ; 3) 删除 wrapper 脚本与 bin 目录、注册表项
+ Delete "$INSTDIR\bin\openakita.cmd"
+ Delete "$INSTDIR\bin\oa.cmd"
+ RMDir "$INSTDIR\bin"
+ DeleteRegKey HKCU "Software\OpenAkita\CLI"
 
  !ifmacrodef NSIS_HOOK_POSTINSTALL
  !insertmacro NSIS_HOOK_POSTINSTALL
