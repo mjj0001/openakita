@@ -249,6 +249,12 @@ def _history_entry(session, conversation_id: str, original_idx: int, msg: dict) 
     chain_summary = msg.get("chain_summary")
     if chain_summary:
         entry["chain_summary"] = chain_summary
+    # Causally-ordered reasoning timeline (preferred over chain_summary on the
+    # client). Lets the reasoning chain re-display faithfully after reload /
+    # multi-window switch instead of the lossy summary rebuild.
+    chain_timeline = msg.get("chain_timeline")
+    if chain_timeline:
+        entry["chain_timeline"] = chain_timeline
     tool_summary = msg.get("tool_summary")
     if tool_summary:
         entry["tool_summary"] = tool_summary

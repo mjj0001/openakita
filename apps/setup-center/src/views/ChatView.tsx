@@ -35,6 +35,7 @@ import type {
   ChainToolCall,
   ChainEntry,
   ChainSummaryItem,
+  ChainTimelineGroup,
   ChatDisplayMode,
   PlanApprovalEvent,
   OrgTimelineEntry,
@@ -65,7 +66,7 @@ import {
   IDLE_THRESHOLD_MS, IDLE_TOKEN_THRESHOLD, PASTE_CHAR_THRESHOLD, UNDO_MAX_STEPS,
   exportConversation, appendAuthToken, stripLegacySummary,
   sanitizeStoredMessages, loadMessagesFromStorage, saveMessagesToStorage, STORED_MESSAGE_WINDOW,
-  buildChainFromSummary, formatAskUserAnswer, patchMessagesWithBackend, patchMessagesWithBackendDetailed,
+  buildChainFromSummary, buildChainFromTimeline, formatAskUserAnswer, patchMessagesWithBackend, patchMessagesWithBackendDetailed,
   classifyError, basename, formatToolDescription, generateGroupSummary,
   ERROR_META, SVG_PATHS, getNextSpinnerTip, shouldRenderConversationMessages,
 } from "./chat/utils/chatHelpers";
@@ -834,14 +835,20 @@ export function ChatView({
   const hydrateSeqRef = useRef(0);
 
   const mapBackendHistoryToMessages = useCallback(
-    (rows: { id: string; index?: number; role: string; content: string; timestamp: number; chain_summary?: ChainSummaryItem[]; artifacts?: ChatArtifact[]; attachments?: ChatAttachment[]; org_timeline?: OrgTimelineEntry[]; ask_user?: ChatAskUser; todo?: ChatTodo; parts?: MessagePart[]; usage?: ChatMessage["usage"] }[]): ChatMessage[] => {
+    (rows: { id: string; index?: number; role: string; content: string; timestamp: number; chain_summary?: ChainSummaryItem[]; chain_timeline?: ChainTimelineGroup[]; artifacts?: ChatArtifact[]; attachments?: ChatAttachment[]; org_timeline?: OrgTimelineEntry[]; ask_user?: ChatAskUser; todo?: ChatTodo; parts?: MessagePart[]; usage?: ChatMessage["usage"] }[]): ChatMessage[] => {
       return rows.map((m) => ({
         id: m.id,
         ...(typeof m.index === "number" ? { historyIndex: m.index } : {}),
         role: m.role as "user" | "assistant" | "system",
         content: m.content,
         timestamp: m.timestamp,
-        ...(m.chain_summary?.length ? { thinkingChain: buildChainFromSummary(m.chain_summary) } : {}),
+        // Prefer the faithful causal timeline; fall back to the lossy summary
+        // for messages persisted before chain_timeline existed.
+        ...(m.chain_timeline?.length
+          ? { thinkingChain: buildChainFromTimeline(m.chain_timeline) }
+          : m.chain_summary?.length
+            ? { thinkingChain: buildChainFromSummary(m.chain_summary) }
+            : {}),
         ...(m.artifacts?.length ? { artifacts: m.artifacts } : {}),
         ...(m.attachments?.length ? { attachments: m.attachments } : {}),
         ...(m.org_timeline?.length ? { orgTimeline: m.org_timeline } : {}),
@@ -2362,12 +2369,13 @@ export function ChatView({
                 // still applies once the bubble is reconciled.
                 if (!m.streamFallback && m.content && !m.streaming && m.content.length >= contentLen) return m;
                 const patched: ChatMessage = { ...m, content: lastAssistant.content, streaming: false, streamStatus: null, streamFallback: undefined };
-                if (
-                  (!m.thinkingChain || m.thinkingChain.length === 0) &&
-                  Array.isArray(lastAssistant.chain_summary) &&
-                  lastAssistant.chain_summary.length > 0
-                ) {
-                  patched.thinkingChain = buildChainFromSummary(lastAssistant.chain_summary);
+                if (!m.thinkingChain || m.thinkingChain.length === 0) {
+                  // Prefer the faithful timeline; fall back to the lossy summary.
+                  if (Array.isArray(lastAssistant.chain_timeline) && lastAssistant.chain_timeline.length > 0) {
+                    patched.thinkingChain = buildChainFromTimeline(lastAssistant.chain_timeline);
+                  } else if (Array.isArray(lastAssistant.chain_summary) && lastAssistant.chain_summary.length > 0) {
+                    patched.thinkingChain = buildChainFromSummary(lastAssistant.chain_summary);
+                  }
                 }
                 return patched;
               });

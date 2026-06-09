@@ -614,7 +614,7 @@ class Session:
     # 计划卡跨重载/多窗口回显（#615）的持久来源，裁掉会让老消息的计划卡再次消失。
     # ``parts`` 也不在此：它是由扁平字段派生的渲染投影（见 api/message_parts.py），
     # 从不入库，故不会撑大 sessions.json，也无需裁剪。
-    _HEAVY_METADATA_KEYS = ("chain_summary", "tool_summary", "artifacts")
+    _HEAVY_METADATA_KEYS = ("chain_summary", "tool_summary", "artifacts", "chain_timeline")
     # 保留最近 N 条消息的完整元数据（前端展示思考链等），更早的仅保留 base content
     _METADATA_PRESERVE_WINDOW = 50
 
