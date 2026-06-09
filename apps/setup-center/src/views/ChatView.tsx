@@ -1,19 +1,17 @@
 // ─── ChatView: 完整 AI 聊天页面 ───
 // 组装层: 通过 hooks + 子组件构建完整聊天界面
 
-import { useEffect, useMemo, useRef, useState, useCallback, memo } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { setLanguage } from "../i18n";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ProviderIcon } from "../components/ProviderIcon";
-import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { setThemePref } from "../theme";
 import type { Theme } from "../theme";
-import { invoke, downloadFile, openFileWithDefault, showInFolder, readFileBase64, onDragDrop, IS_TAURI, IS_WEB, IS_MOBILE_BROWSER, onWsEvent, logger, getAssetUrl } from "../platform";
-import { getAccessToken } from "../platform/auth";
+import { downloadFile, showInFolder, readFileBase64, onDragDrop, IS_TAURI, IS_WEB, IS_MOBILE_BROWSER, onWsEvent, logger } from "../platform";
 import { safeFetch } from "../providers";
 import type {
   ChatMessage,
@@ -24,7 +22,6 @@ import type {
   ChatTodo,
   ChatTodoStep,
   ChatAskUser,
-  ChatAskQuestion,
   ChatAttachment,
   ChatArtifact,
   ChatSource,
@@ -41,48 +38,43 @@ import type {
   OrgTimelineEntry,
   MessagePart,
 } from "../types";
-import { genId, formatTime, formatDate, timeAgo } from "../utils";
+import { genId, timeAgo } from "../utils";
 import { notifyError } from "../utils/notify";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import {
   IconSend, IconPaperclip, IconMic, IconStopCircle,
   IconPlan, IconPlus, IconMenu, IconStop, IconX,
-  IconCheck, IconLoader, IconCircle, IconPlay, IconMinus,
+  IconCheck, IconLoader, IconCircle,
   IconChevronDown, IconChevronUp, IconMessageCircle, IconChevronRight,
-  IconImage, IconRefresh, IconClipboard, IconTrash, IconZap,
-  IconMask, IconBot, IconUsers, IconHelp, IconEdit, IconDownload,
+  IconClipboard, IconTrash, IconZap,
+  IconBot, IconEdit, IconDownload,
   IconPin, IconSearch, IconCircleDot, IconXCircle,
-  IconBuilding, IconShield, IconAlertCircle,
+  IconBuilding, IconAlertCircle,
   IconHourglass, IconTarget, IconCheckCircle, IconPlug, IconClock, IconBarChart, IconGlobe, IconMail,
-  getFileTypeIcon,
 } from "../icons";
 
 // ─── Chat module imports ───
 import type {
-  MdModules, QueuedMessage, StreamEvent,
+  QueuedMessage, StreamEvent,
   SubAgentEntry, SubAgentTask, StreamContext, AgentProfile,
 } from "./chat/utils/chatTypes";
 import {
   IDLE_THRESHOLD_MS, IDLE_TOKEN_THRESHOLD, PASTE_CHAR_THRESHOLD, UNDO_MAX_STEPS,
-  exportConversation, appendAuthToken, stripLegacySummary,
-  sanitizeStoredMessages, loadMessagesFromStorage, saveMessagesToStorage, STORED_MESSAGE_WINDOW,
+  exportConversation,
+  loadMessagesFromStorage, saveMessagesToStorage, STORED_MESSAGE_WINDOW,
   buildChainFromSummary, buildChainFromTimeline, formatAskUserAnswer, patchMessagesWithBackend, patchMessagesWithBackendDetailed,
-  classifyError, basename, formatToolDescription, generateGroupSummary,
-  ERROR_META, SVG_PATHS, getNextSpinnerTip, shouldRenderConversationMessages,
+  classifyError, formatToolDescription,
+  shouldRenderConversationMessages,
 } from "./chat/utils/chatHelpers";
 import { useMdModules } from "./chat/hooks/useMdModules";
 import { useMessageReducer, useConversationReducer } from "./chat/hooks/useMessages";
-import type { MessageAction, ConversationAction } from "./chat/hooks/useMessages";
 import { useQueryGuard } from "./chat/hooks/useQueryGuard";
-import type { QueryState } from "./chat/hooks/useQueryGuard";
 import { useSecurityPolicy } from "./chat/hooks/useSecurityPolicy";
 import {
-  SpinnerTipDisplay, AttachmentPreview, ErrorCard,
-  ThinkingBlock, ToolCallDetail, ToolCallsGroup, ThinkingChain,
+  AttachmentPreview,
   FloatingPlanBar, PlanApprovalPanel,
   SlashCommandPanel, RenderIcon, SubAgentCards,
   SecurityConfirmModal, ContextMenuInner, LightboxOverlay,
-  MessageBubble, FlatMessageItem,
   MessageList,
 } from "./chat/components";
 import type { SecurityCloseInfo } from "./chat/components";
@@ -97,29 +89,6 @@ function _cmdPrefix(cmd: string): string {
 
 const HISTORY_PAGE_LIMIT = 80;
 type EndpointPolicy = "prefer" | "require";
-
-function formatOrgCommandPhase(phase?: string, openChainCount?: number): string {
-  switch (phase) {
-    case "awaiting_summary":
-      return "正在等待主编汇总最终结果";
-    case "done":
-      return "组织命令已完成";
-    case "error":
-      return "组织命令执行出错";
-    case "running":
-    default:
-      if (typeof openChainCount === "number" && openChainCount > 0) {
-        return `正在等待 ${openChainCount} 条下级任务链收口`;
-      }
-      return "组织正在协调任务";
-  }
-}
-
-const SOFT_ORG_EXIT_REASONS = new Set(["normal", "ask_user", "waiting_user", "verify_incomplete"]);
-
-function isSoftOrgExitReason(reason?: string): boolean {
-  return !reason || SOFT_ORG_EXIT_REASONS.has(reason);
-}
 
 type HistoryPageState = {
   total: number;
@@ -314,7 +283,6 @@ export function ChatView({
   const [selectedEndpoint, setSelectedEndpoint] = useState("auto");
   const [selectedEndpointPolicy, setSelectedEndpointPolicy] = useState<EndpointPolicy>("prefer");
   const [chatMode, setChatMode] = useState<"agent" | "plan" | "ask">("agent");
-  const planMode = chatMode === "plan";
   const [pendingApproval, setPendingApproval] = useState<PlanApprovalEvent | null>(null);
   const pendingApprovalRef = useRef<PlanApprovalEvent | null>(null);
   const [deathSwitchActive, setDeathSwitchActive] = useState(false);
@@ -432,7 +400,7 @@ export function ChatView({
     },
     [apiBaseUrl, securityAggWindow],
   );
-  const [winSize, setWinSize] = useState({ w: window.innerWidth, h: window.innerHeight });
+  const [, setWinSize] = useState({ w: window.innerWidth, h: window.innerHeight });
   useEffect(() => {
     if (!lightbox) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setLightbox(null); };
@@ -2518,7 +2486,6 @@ export function ChatView({
       let buffer = "";
       let currentContent = "";
       let currentThinking = "";
-      let isThinking = false;
       let currentToolCalls: ChatToolCall[] = [];
       const currentToolCallsByKey = new Map<string, ChatToolCall>();
       const currentToolCallOrder: string[] = [];
@@ -2758,7 +2725,6 @@ export function ChatView({
                 break;
               }
               case "thinking_start":
-                isThinking = true;
                 thinkingStartTime = Date.now();
                 currentThinkingContent = "";
                 if (!currentChainGroup) {
@@ -2783,7 +2749,6 @@ export function ChatView({
                 }
                 break;
               case "thinking_end": {
-                isThinking = false;
                 const _thinkDuration = event.duration_ms || (Date.now() - thinkingStartTime);
                 const _hasThinking = event.has_thinking ?? (currentThinkingContent.length > 0);
                 if (currentChainGroup) {
