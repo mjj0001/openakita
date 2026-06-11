@@ -724,7 +724,7 @@ class Settings(BaseSettings):
         description="站内信 L0 公开广播 JSON URL。",
     )
     inbox_api_url: str = Field(
-        default="https://api-admin.openakita.ai",
+        default="https://openakita-admin-api.fzstack.com",
         description="OpenAkita Platform L1 客户端 API base URL。",
     )
     inbox_poll_interval_sec: int = Field(
@@ -753,7 +753,7 @@ class Settings(BaseSettings):
         description="是否允许匿名遥测/升级事件上报。当前站内信 ack 仍受 inbox_* 开关控制。",
     )
     updater_policy_endpoint: str = Field(
-        default="https://api-admin.openakita.ai/updater",
+        default="https://openakita-admin-api.fzstack.com/updater",
         description="在线升级策略层 endpoint base URL，setup-center/updater 可按需使用。",
     )
 
