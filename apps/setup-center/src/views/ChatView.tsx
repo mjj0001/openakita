@@ -1295,7 +1295,14 @@ export function ChatView({
               ...local,
               title: local.titleGenerated ? local.title : (b.title || local.title || "对话"),
               lastMessage: b.lastMessage || local.lastMessage,
-              timestamp: Math.max(local.timestamp || 0, b.timestamp || 0),
+              // 后端时间戳现以"最后一条真实消息"为准（见后端 #628 修复），是列表
+              // 排序/显示的权威值。这里**不能**再无脑 Math.max：早期被旧逻辑
+              // 污染（≈打开时刻）并缓存进 localStorage 的 local.timestamp 会被
+              // Math.max 永久锁住，导致升级后时间与顺序仍然不对。只有正在流式
+              // 输出的会话保留本地乐观值，避免对账瞬间把活跃会话往下挪。
+              timestamp: streamContexts.current.has(b.id)
+                ? Math.max(local.timestamp || 0, b.timestamp || 0)
+                : (b.timestamp || local.timestamp || 0),
               messageCount: Math.max(local.messageCount || 0, b.messageCount || 0),
               agentProfileId: b.agentProfileId || local.agentProfileId,
               endpointId: b.endpointId || local.endpointId,
