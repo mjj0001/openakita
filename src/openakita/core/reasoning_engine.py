@@ -5048,6 +5048,57 @@ class ReasoningEngine:
                     )
 
                     if isinstance(result, str):
+                        # === Steer done-drain ===
+                        # The model produced a final answer with no tool calls,
+                        # so process_post_tool_signals did NOT drain inserts this
+                        # round. A message steered in (insert_user_message) while
+                        # this answer was being generated would otherwise be lost
+                        # the instant we terminate. Address it now: fold the
+                        # finished answer into context, inject the steered
+                        # message, and loop once more. Bounded by max_iterations
+                        # inside the helper, so it can never run away.
+                        _steered = await self._drain_steer_before_finish(
+                            state=state,
+                            working_messages=working_messages,
+                            final_text=result,
+                            iteration=_iteration,
+                            max_iterations=max_iterations,
+                        )
+                        if _steered:
+                            # Surface the answer the model just finished so the
+                            # user still sees it before the follow-up is handled.
+                            if _streamed_text:
+                                if result != _raw_streamed_text:
+                                    yield {"type": "text_replace", "content": result}
+                            else:
+                                _chunk = 20
+                                for _ci in range(0, len(result), _chunk):
+                                    yield {
+                                        "type": "text_delta",
+                                        "content": result[_ci : _ci + _chunk],
+                                    }
+                                    await asyncio.sleep(0.01)
+                            for _ins_text in _steered:
+                                yield {
+                                    "type": "chain_text",
+                                    "content": f"用户插入消息: {_ins_text[:60]}",
+                                }
+                            # Fresh per-answer budget: the steered message is a
+                            # new user ask, don't penalise it with the previous
+                            # answer's retry/verify counters.
+                            no_tool_call_count = 0
+                            verify_incomplete_count = 0
+                            no_confirmation_text_count = 0
+                            logger.info(
+                                "[ReAct-Stream][DoneDrain] %d steered message(s) "
+                                "arrived during final-answer generation; folding "
+                                "answer into context and continuing (iter=%d/%d)",
+                                len(_steered),
+                                _iteration + 1,
+                                max_iterations,
+                            )
+                            react_trace.append(_iter_trace)
+                            continue
                         react_trace.append(_iter_trace)
                         final_exit_reason = self._last_exit_reason
                         is_verify_incomplete = final_exit_reason == "verify_incomplete"
@@ -8117,6 +8168,67 @@ class ReasoningEngine:
             return f"任务已执行完毕（使用了工具：{tool_summary}），但模型未生成文本总结。如需详情请重新提问。"
 
         return None
+
+    # ==================== Steer done-drain ====================
+
+    @staticmethod
+    async def _drain_steer_before_finish(
+        *,
+        state: "TaskState | None",
+        working_messages: list[dict],
+        final_text: str,
+        iteration: int,
+        max_iterations: int,
+    ) -> list[str]:
+        """Final-answer done-drain: rescue a message steered in during the
+        last LLM generation so the turn does not terminate while it is still
+        sitting un-read in ``pending_user_inserts``.
+
+        Background
+        ----------
+        ``process_post_tool_signals`` only drains ``pending_user_inserts``
+        after a tool round. When the model produces a *final answer with no
+        tool calls* that drain never runs, so anything that arrived via
+        ``insert_user_message`` while the answer was being generated would be
+        lost the instant the loop terminates. This is the STEER race: the
+        desktop client injects the follow-up the moment the turn appears to
+        finish.
+
+        Behaviour
+        ---------
+        * No pending insert → return ``[]``; caller terminates normally.
+        * Pending insert AND iteration budget remains → fold ``final_text``
+          back into ``working_messages`` as a settled assistant turn, append
+          the steered message(s) with the canonical insert wording, and
+          return the drained texts so the caller continues the loop.
+        * Pending insert but ``iteration`` is the last allowed one → return
+          ``[]`` WITHOUT draining. This is the hard anti-hang ceiling: the
+          loop can never be extended past ``max_iterations``, so a client
+          that keeps steering a message on every single final answer can at
+          worst consume the remaining iteration budget, never loop forever.
+          (The un-drained message stays in ``pending_user_inserts`` rather
+          than being appended to a context we are about to abandon.)
+
+        The method is intentionally static + dependency-free so it can be
+        unit-tested in isolation against a real :class:`TaskState`, without
+        standing up the full reasoning-engine coroutine.
+        """
+        if state is None or not getattr(state, "pending_user_inserts", None):
+            return []
+        # Hard ceiling: never grant another iteration on the last loop tick.
+        if iteration >= max_iterations - 1:
+            return []
+        drained = await state.drain_user_inserts()
+        if not drained:
+            return []
+        # Settle the answer the model just produced into the transcript so the
+        # follow-up turn sees what was already told to the user.
+        working_messages.append(
+            {"role": "assistant", "content": [{"type": "text", "text": final_text}]}
+        )
+        for _text in drained:
+            working_messages.append(state.build_user_insert_message(_text))
+        return drained
 
     # ==================== 最终答案处理 ====================
 
