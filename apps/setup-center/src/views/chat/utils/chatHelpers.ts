@@ -412,6 +412,36 @@ function coerceTimelineEntries(raw: unknown): ChainEntry[] {
           status: r.status === "error" ? "error" : "done",
         });
         break;
+      case "config_hint": {
+        const rawHint = r.hint && typeof r.hint === "object" ? r.hint as Record<string, unknown> : {};
+        const rawActions = rawHint.actions;
+        const actions = Array.isArray(rawActions)
+          ? rawActions
+              .filter((action): action is Record<string, unknown> => !!action && typeof action === "object")
+              .map((action) => ({ ...action }))
+          : undefined;
+        out.push({
+          kind: "config_hint",
+          toolId: String(r.toolId ?? ""),
+          hint: {
+            scope: String(rawHint.scope ?? ""),
+            error_code: (
+              rawHint.error_code === "missing_credential" ||
+              rawHint.error_code === "auth_failed" ||
+              rawHint.error_code === "rate_limited" ||
+              rawHint.error_code === "network_unreachable" ||
+              rawHint.error_code === "content_filter" ||
+              rawHint.error_code === "unknown"
+                ? rawHint.error_code
+                : "unknown"
+            ),
+            title: String(rawHint.title ?? ""),
+            ...(rawHint.message != null ? { message: String(rawHint.message) } : {}),
+            ...(actions ? { actions } : {}),
+          },
+        });
+        break;
+      }
       case "compressed":
         out.push({
           kind: "compressed",

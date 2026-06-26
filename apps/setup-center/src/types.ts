@@ -372,8 +372,8 @@ export type ChainToolCall = {
  * ``ChainGroup.entries`` assembly and stores it as ``chain_timeline``). The
  * client restores it with ``buildChainFromTimeline`` so the reasoning chain
  * re-displays faithfully after reload / multi-window switch, instead of the
- * lossy ``chain_summary`` rebuild. Entries reuse the live ``ChainEntry`` shape
- * (minus ``config_hint``, which is not persisted).
+ * lossy ``chain_summary`` rebuild. Entries reuse the live ``ChainEntry`` shape,
+ * including ``config_hint`` action cards.
  */
 export type ChainTimelineGroup = {
   iteration: number;
